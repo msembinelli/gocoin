@@ -8,6 +8,7 @@ import (
     "encoding/binary"
     "bytes"
     "crypto/sha256"
+    "reflect"
     )
 
 // Bitcoin protocol constants for this node
@@ -20,14 +21,14 @@ var TESTNET_TCP_PORT uint16 = 18333 // bitcoin test network port
 var NODE_SERVICES uint64 = 1
 
 // Generic protocol message header
-type message_header struct {
-    magic uint32
-    command [12]byte
-    length uint32
-    checksum uint32
+type MessageHeader struct {
+    Magic uint32
+    Command [12]byte
+    Length uint32
+    Checksum uint32
 }
 
-func (h message_header) serialize() []byte {
+func (h MessageHeader) serialize() []byte {
     buffer := new(bytes.Buffer)
 
     err := binary.Write(buffer, binary.LittleEndian, h)
@@ -41,125 +42,83 @@ func (h message_header) serialize() []byte {
 }
 
 // version message requires a network address struct with no time field
-type net_addr_no_time struct {
-    services uint64
-    ip [16]byte
-    port uint16
+type NetAddrNoTime struct {
+    Services uint64
+    Ip [16]byte
+    Port uint16
 }
 
-func (n net_addr_no_time) serialize() []byte {
+func (n NetAddrNoTime) Serialize() []byte {
     buffer := new(bytes.Buffer)
 
-    err := binary.Write(buffer, binary.LittleEndian, n.services)
-    if err != nil {
-        fmt.Println(err)
-        // Return empty buffer
-        return new(bytes.Buffer).Bytes()
-    }
+    v := reflect.ValueOf(n)
 
-    err = binary.Write(buffer, binary.LittleEndian, n.ip)
-    if err != nil {
-        fmt.Println(err)
-        // Return empty buffer
-        return new(bytes.Buffer).Bytes()
-    }
-
-    err = binary.Write(buffer, binary.BigEndian, n.port)
-    if err != nil {
-        fmt.Println(err)
-        // Return empty buffer
-        return new(bytes.Buffer).Bytes()
+    for i := 0; i < v.NumField(); i++ {
+        var err error
+        // Port is the only field to be written in BigEndian format
+        if v.Type().Field(i).Name != "Port" {
+            err = binary.Write(buffer, binary.LittleEndian, v.Field(i).Interface())
+        } else {
+            err = binary.Write(buffer, binary.BigEndian, v.Field(i).Interface())
+        }
+        if err != nil {
+            fmt.Println(err)
+            // Return empty buffer
+            return new(bytes.Buffer).Bytes()
+        }
     }
 
     return buffer.Bytes()
 }
 
-type net_addr struct {
-    time uint32
-    net_addr_no_time
+type NetAddr struct {
+    Time uint32
+    NetAddrNoTime
 }
 
-func (n net_addr) serialize() []byte {
+func (n NetAddr) Serialize() []byte {
     buffer := new(bytes.Buffer)
 
-    err := binary.Write(buffer, binary.LittleEndian, n.time)
+    err := binary.Write(buffer, binary.LittleEndian, n.Time)
     if err != nil {
         fmt.Println(err)
         // Return empty buffer
         return new(bytes.Buffer).Bytes()
     }
 
-    return append(buffer.Bytes(), n.net_addr_no_time.serialize()...)
+    return append(buffer.Bytes(), n.NetAddrNoTime.Serialize()...)
 }
 
-type version struct {
-    version int32
-    services uint64
-    timestamp int64
-    addr_recv net_addr_no_time
-    addr_from net_addr_no_time
-    nonce uint64
-    user_agent [1]byte
-    start_height int32
-    relay bool
+type Version struct {
+    Version int32
+    Services uint64
+    Timestamp int64
+    AddrRecv NetAddrNoTime
+    AddrFrom NetAddrNoTime
+    Nonce uint64
+    UserAgent [1]byte
+    StartHeight int32
+    Relay bool
 }
 
-// TODO: shrink this code. How can we iterate over each struct member?
-func (v version) serialize() []byte {
+func (v Version) Serialize() []byte {
     buffer := new(bytes.Buffer)
 
-    err := binary.Write(buffer, binary.LittleEndian, v.version)
-    if err != nil {
-        fmt.Println(err)
-        return new(bytes.Buffer).Bytes()
-    }
+    s := reflect.ValueOf(v)
 
-    err = binary.Write(buffer, binary.LittleEndian, v.services)
-    if err != nil {
-        fmt.Println(err)
-        return new(bytes.Buffer).Bytes()
-    }
-
-    err = binary.Write(buffer, binary.LittleEndian, v.timestamp)
-    if err != nil {
-        fmt.Println(err)
-        return new(bytes.Buffer).Bytes()
-    }
-
-    err = binary.Write(buffer, binary.LittleEndian, v.addr_recv.serialize())
-    if err != nil {
-        fmt.Println(err)
-        return new(bytes.Buffer).Bytes()
-    }
-
-    err = binary.Write(buffer, binary.LittleEndian, v.addr_from.serialize())
-    if err != nil {
-        fmt.Println(err)
-        return new(bytes.Buffer).Bytes()
-    }
-
-    err = binary.Write(buffer, binary.LittleEndian, v.nonce)
-    if err != nil {
-        fmt.Println(err)
-        return new(bytes.Buffer).Bytes()
-    }
-
-    err = binary.Write(buffer, binary.LittleEndian, v.user_agent)
-    if err != nil {
-        fmt.Println(err)
-        return new(bytes.Buffer).Bytes()
-    }
-
-    err = binary.Write(buffer, binary.LittleEndian, v.start_height)
-    if err != nil {
-        fmt.Println(err)
-        return new(bytes.Buffer).Bytes()
-    }
-
-    err = binary.Write(buffer, binary.LittleEndian, v.relay)
-    if err != nil {
-        fmt.Println(err)
-        return new(bytes.Buffer).Bytes()
+    for i := 0; i < s.NumField(); i++ {
+        var err error
+        if reflect.Value.Type(s.Field(i)).Name() == "NetAddrNoTime" {
+            r := reflect.ValueOf(s.Field(i).Interface()).MethodByName("Serialize")
+            err = binary.Write(buffer, binary.LittleEndian, r.Call([]reflect.Value{})[0].Bytes())
+        } else {
+            err = binary.Write(buffer, binary.LittleEndian, s.Field(i).Interface())
+        }
+        if err != nil {
+            fmt.Println(err)
+            // Return empty buffer
+            return new(bytes.Buffer).Bytes()
+        }
     }
 
     return buffer.Bytes()
@@ -178,45 +137,45 @@ func checksum(slice []byte) uint32 {
 
 // Combine the network message header with the payload
 func build_message(magic uint32, command string, payload []byte) []byte {
-    var h message_header
-    h.magic = magic
-    h.checksum = checksum(payload)
-    h.length = uint32(len(payload))
-    copy(h.command[:], command)
+    var h MessageHeader
+    h.Magic = magic
+    h.Checksum = checksum(payload)
+    h.Length = uint32(len(payload))
+    copy(h.Command[:], command)
     return append(h.serialize(), payload...)
 }
 
-func build_version_message(user_agent string, last_block int32) []byte {
+func build_version_message(magic uint32, user_agent string, last_block int32) []byte {
     // Seed RNG for version message nonce
     rand.Seed(time.Now().UnixNano())
 
     // Create version message
-    var v version
+    var v Version
 
     // Populate version message
-    v.version = PROTOCOL_VERSION
-    v.services = NODE_SERVICES
-    v.timestamp = int64(time.Now().Unix())
+    v.Version = PROTOCOL_VERSION
+    v.Services = NODE_SERVICES
+    v.Timestamp = int64(time.Now().Unix())
 
     // Set structure addresses
-    var r net_addr_no_time
-    r.services = NODE_SERVICES
+    var r NetAddrNoTime
+    r.Services = NODE_SERVICES
     ip := net.IP([]byte{127, 0, 0, 1})
-    copy(r.ip[:], ip.To16())
-    r.port = MAINNET_TCP_PORT
-    v.addr_recv = r
-    v.addr_from = r
+    copy(r.Ip[:], ip.To16())
+    r.Port = MAINNET_TCP_PORT
+    v.AddrRecv = r
+    v.AddrFrom = r
 
-    v.nonce = rand.Uint64()
-    copy(v.user_agent[:], user_agent)
-    v.start_height = last_block
-    v.relay = true
+    v.Nonce = rand.Uint64()
+    copy(v.UserAgent[:], user_agent)
+    v.StartHeight = last_block
+    v.Relay = true
 
-    return build_message(MAINNET_MAGIC, "version", v.serialize())
+    return build_message(magic, "version", v.Serialize())
 }
 
 func main() {
-    version_message := build_version_message("", 0)
+    version_message := build_version_message(MAINNET_MAGIC, "", 0)
     fmt.Println("Send version message:", version_message)
 
     // connect to this socket
