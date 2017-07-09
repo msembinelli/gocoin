@@ -9,6 +9,8 @@ import (
     "bytes"
     "crypto/sha256"
     "reflect"
+    "bufio"
+    "strings"
     )
 
 // Bitcoin protocol constants for this node
@@ -108,6 +110,8 @@ func (v Version) Serialize() []byte {
 
     for i := 0; i < s.NumField(); i++ {
         var err error
+        // For types NetAddrNoTime, a custom serialize function exists, so we must call that instead
+        // Reflect can do this, but it looks a little verbose
         if reflect.Value.Type(s.Field(i)).Name() == "NetAddrNoTime" {
             r := reflect.ValueOf(s.Field(i).Interface()).MethodByName("Serialize")
             err = binary.Write(buffer, binary.LittleEndian, r.Call([]reflect.Value{})[0].Bytes())
@@ -174,19 +178,121 @@ func build_version_message(magic uint32, user_agent string, last_block int32) []
     return build_message(magic, "version", v.Serialize())
 }
 
+func build_verack_message(magic uint32) []byte {
+    return build_message(magic, "verack", []byte{})
+}
+
+func print_message_header(h MessageHeader) {
+    fmt.Println("**MESSAGE HEADER**\n")
+    fmt.Printf("  magic 0x%X\n", h.Magic)
+    fmt.Printf("  type %s\n", string(h.Command[:]))
+    fmt.Printf("  length %d\n", h.Length)
+    fmt.Printf("  checksum 0x%X\n\n", h.Checksum)
+}
+
+func print_message_header_hex(header []byte) {
+    fmt.Println("**MESSAGE HEADER HEX**")
+    var i uint32
+    i = 0
+    for _, v := range header {
+        if (i % 16) == 0 {
+            fmt.Printf("\n")
+        } else if (i % 8) == 0 {
+            fmt.Printf(" ")
+        }
+        fmt.Printf("%02X ", v)
+        i++
+    }
+    fmt.Printf("\n\n")
+}
+
+func deserialize_message_header(received []byte) MessageHeader {
+    var h MessageHeader
+    buf := bytes.NewReader(received)
+    err := binary.Read(buf, binary.LittleEndian, &h)
+    if err != nil {
+        fmt.Println("binary.Read failed:", err)
+    }
+    print_message_header(h)
+    print_message_header_hex(received)
+    return h
+}
+
+func print_message_payload_hex(payload []byte) {
+    fmt.Println("**MESSAGE PAYLOAD HEX**")
+    var i uint32
+    i = 0
+    for _, v := range payload {
+        if (i % 16) == 0 {
+            fmt.Printf("\n")
+        } else if (i % 8) == 0 {
+            fmt.Printf(" ")
+        }
+        fmt.Printf("%02X ", v)
+        i++
+    }
+    fmt.Printf("\n\n")
+}
+
+func process_message(header MessageHeader, payload []byte) []byte {
+    switch(strings.TrimRight(string(header.Command[:]), "\x00")) {
+    case "version":
+        break;
+    case "verack":
+        break;
+    default:
+        break;
+    }
+    print_message_payload_hex(payload)
+}
+
+func message_handler(conn net.Conn) {
+    //fmt.Println("Handling new connection...")
+
+    // Close connection when this function ends
+    defer func() {
+        //fmt.Println("Closing connection...")
+        conn.Close()
+    }()
+
+    timeout_duration := 5 * time.Second
+    buf_reader := bufio.NewReader(conn)
+    for {
+		// Set a deadline for reading. Read operation will fail if no data
+		// is received after deadline.
+		conn.SetReadDeadline(time.Now().Add(timeout_duration))
+
+		// Read tokens delimited by newline
+		bytes, err := buf_reader.ReadBytes('\n')
+		if err != nil {
+			//fmt.Println(err)
+			return
+		}
+
+		//fmt.Printf("%s", bytes)
+		process_message(deserialize_message_header(bytes[:24]), bytes[24:])
+	}
+}
+
 func main() {
     version_message := build_version_message(MAINNET_MAGIC, "", 0)
-    fmt.Println("Send version message:", version_message)
+    //fmt.Println("Send version message:", version_message)
 
+    var sent bool
+    sent = false
     // connect to this socket
-    conn, err := net.Dial("tcp", "209.73.142.226:8333")
-    if err != nil {
-        fmt.Println(err)
+    for {
+        conn, err := net.Dial("tcp", "209.73.142.226:8333")
+        if err != nil {
+            fmt.Println(err)
+        }
+
+        // Send version message once
+        if (!sent) {
+            conn.Write(version_message)
+            sent = true
+        }
+
+        go message_handler(conn)
     }
-
-    conn.Write(version_message)
-    buff := make([]byte, 1024)
-
-    n, _ := conn.Read(buff)
-    fmt.Println("Message received from server:", buff[:n])
 }
