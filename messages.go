@@ -11,6 +11,7 @@ import (
     "reflect"
     "bufio"
     "strings"
+    "./message_fifo"
     )
 
 // Bitcoin protocol constants for this node
@@ -21,6 +22,12 @@ var MAINNET_TCP_PORT uint16 = 8333 // bitcoin main network port
 var TESTNET_MAGIC uint32 = 0xDAB5BFFA // bitcoin test network
 var TESTNET_TCP_PORT uint16 = 18333 // bitcoin test network port
 var NODE_SERVICES uint64 = 1
+var MESSAGE_HEADER_LENGTH uint32 = 24
+
+var TX_FIFO_SIZE uint32 = 32
+var RX_FIFO_SIZE uint32 = 32
+var TX_FIFO *message_fifo.FIFO
+var RX_FIFO *message_fifo.FIFO
 
 // Generic protocol message header
 type MessageHeader struct {
@@ -129,7 +136,7 @@ func (v Version) Serialize() []byte {
 }
 
 // Calculate message checksum. First 4 bytes of sha256(sha256(payload))
-func checksum(slice []byte) uint32 {
+func message_checksum(slice []byte) uint32 {
     hash := sha256.New()
     hash.Write(slice)
     sum := hash.Sum(nil)
@@ -143,7 +150,7 @@ func checksum(slice []byte) uint32 {
 func build_message(magic uint32, command string, payload []byte) []byte {
     var h MessageHeader
     h.Magic = magic
-    h.Checksum = checksum(payload)
+    h.Checksum = message_checksum(payload)
     h.Length = uint32(len(payload))
     copy(h.Command[:], command)
     return append(h.serialize(), payload...)
@@ -218,7 +225,11 @@ func deserialize_message_header(received []byte) MessageHeader {
     return h
 }
 
-func print_message_payload_hex(payload []byte) {
+func print_message_payload_hex(payload []byte, length uint32) {
+    if length == 0 {
+        return
+    }
+
     fmt.Println("**MESSAGE PAYLOAD HEX**")
     var i uint32
     i = 0
@@ -234,19 +245,48 @@ func print_message_payload_hex(payload []byte) {
     fmt.Printf("\n\n")
 }
 
-func process_message(header MessageHeader, payload []byte) []byte {
-    switch(strings.TrimRight(string(header.Command[:]), "\x00")) {
-    case "version":
-        break;
-    case "verack":
-        break;
-    default:
-        break;
+func is_checksum_valid(checksum uint32, payload []byte) bool {
+    if message_checksum(payload) == checksum {
+        return true
     }
-    print_message_payload_hex(payload)
+    return false
 }
 
-func message_handler(conn net.Conn) {
+func process_rx_queue() {
+    for {
+        if(RX_FIFO.Len() > 0) {
+            var node *message_fifo.NODE
+            node = RX_FIFO.Pop()
+            header := deserialize_message_header(node.Message[:MESSAGE_HEADER_LENGTH])
+            print_message_payload_hex(node.Message[MESSAGE_HEADER_LENGTH:], header.Length)
+            switch(strings.TrimRight(string(header.Command[:]), "\x00")) {
+            case "version":
+                var node message_fifo.NODE
+                node.Message = build_verack_message(MAINNET_MAGIC)
+                TX_FIFO.Push(&node)
+                break;
+            case "verack":
+                // Do nothing
+                break;
+            default:
+                break;
+            }
+        }
+    }
+}
+
+func tx_message_handler(conn net.Conn) {
+    //fmt.Println("Handling new connection...")
+
+    if(TX_FIFO.Len() > 0) {
+        var node *message_fifo.NODE
+        node = TX_FIFO.Pop()
+
+        conn.Write(node.Message)
+    }
+}
+
+func rx_message_handler(conn net.Conn) {
     //fmt.Println("Handling new connection...")
 
     // Close connection when this function ends
@@ -262,37 +302,51 @@ func message_handler(conn net.Conn) {
 		// is received after deadline.
 		conn.SetReadDeadline(time.Now().Add(timeout_duration))
 
-		// Read tokens delimited by newline
-		bytes, err := buf_reader.ReadBytes('\n')
-		if err != nil {
+        // Read message header first, so we know how much to read out of the payload
+        header_raw := make([]byte, MESSAGE_HEADER_LENGTH)
+		n, err := buf_reader.Read(header_raw)
+		if err != nil || uint32(n) != MESSAGE_HEADER_LENGTH {
+			//fmt.Println(err)
+			return
+		}
+        header_struct := deserialize_message_header(header_raw)
+        payload_raw := make([]byte, header_struct.Length)
+        n, err = buf_reader.Read(payload_raw)
+		if err != nil || uint32(n) != header_struct.Length {
 			//fmt.Println(err)
 			return
 		}
 
-		//fmt.Printf("%s", bytes)
-		process_message(deserialize_message_header(bytes[:24]), bytes[24:])
+        // Ensure checksum is valid
+        if(is_checksum_valid(header_struct.Checksum, payload_raw)) {
+            // Add to message queue
+            var node message_fifo.NODE
+            node.Message = append(header_raw, payload_raw...)
+            RX_FIFO.Push(&node)
+        }
 	}
 }
 
 func main() {
-    version_message := build_version_message(MAINNET_MAGIC, "", 0)
     //fmt.Println("Send version message:", version_message)
+    RX_FIFO = message_fifo.GENERIC_New(RX_FIFO_SIZE)
+    TX_FIFO = message_fifo.GENERIC_New(TX_FIFO_SIZE)
 
-    var sent bool
-    sent = false
+    go process_rx_queue()
+
+    // Send version message once
+    var node message_fifo.NODE
+    node.Message = build_version_message(MAINNET_MAGIC, "", 0)
+    TX_FIFO.Push(&node)
+
     // connect to this socket
     for {
-        conn, err := net.Dial("tcp", "209.73.142.226:8333")
+        conn, err := net.Dial("tcp", "52.41.9.64:8333")
         if err != nil {
             fmt.Println(err)
         }
 
-        // Send version message once
-        if (!sent) {
-            conn.Write(version_message)
-            sent = true
-        }
-
-        go message_handler(conn)
+        go tx_message_handler(conn)
+        go rx_message_handler(conn)
     }
 }
